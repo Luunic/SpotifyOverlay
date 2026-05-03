@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QPoint, QTimer, QRect, QRectF, QPointF, QThread, pyqtSignal
 from PyQt6.QtGui import (
-    QPixmap, QPainter, QColor, QFont, QPainterPath,
+    QPixmap, QPainter, QColor, QFont, QFontMetrics, QPainterPath,
     QLinearGradient, QBrush, QPen, QMouseEvent, QPolygonF
 )
 
@@ -254,6 +254,120 @@ class MusicAPI:
         if Sp is None: return
         try: Sp.volume(int(value * 100))
         except Exception as e: print(f"[Spotify] set_volume: {e}")
+
+
+# ══════════════════════════════════════════════════════════
+#  Background worker – runs Spotify API calls off the UI thread
+#  so the marquee animation never stutters during network I/O.
+# ══════════════════════════════════════════════════════════
+
+class SpotifyWorker(QThread):
+    """
+    Fetches the current Spotify playback state in a background thread.
+    Emits `result` with the track dict when done; `error` on failure.
+    """
+    result = pyqtSignal(dict)
+    error  = pyqtSignal(str)
+
+    def run(self):
+        try:
+            track = MusicAPI.get_current_track()
+            self.result.emit(track)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ══════════════════════════════════════════════════════════
+#  Marquee label – scrolls text horizontally when it overflows.
+#  Short text stays static. Speed is fixed (px/s), not duration-based.
+# ══════════════════════════════════════════════════════════
+
+class MarqueeLabel(QWidget):
+    """
+    Single-line text label that smoothly scrolls when the text is wider
+    than the widget. Short text is drawn statically (no scroll).
+
+    Speed is fixed in pixels-per-second so title and artist always move
+    at the same rate regardless of length.
+    """
+
+    SCROLL_PX_PER_S = 20    # pixels scrolled per second
+    PAUSE_MS        = 1500  # pause at start before scrolling begins (ms)
+    GAP_PX          = 48    # gap between end of text and repeated copy
+
+    def __init__(self, font: QFont, color: QColor, parent=None):
+        super().__init__(parent)
+        self._font      = font
+        self._color     = color
+        self._text      = ""
+        self._offset    = 0.0
+        self._text_w    = 0
+        self._scrolling = False
+        self._pausing   = True
+
+        self.setFixedHeight(QFontMetrics(font).height() + 2)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
+        # ~60 fps animation tick
+        self._tick = QTimer(self)
+        self._tick.setInterval(16)
+        self._tick.timeout.connect(self._step)
+
+        # One-shot pause before scroll begins
+        self._pause_timer = QTimer(self)
+        self._pause_timer.setSingleShot(True)
+        self._pause_timer.timeout.connect(self._start_scroll)
+
+    def setText(self, text: str):
+        if text == self._text:
+            return
+        self._text      = text
+        self._offset    = 0.0
+        self._pausing   = True
+        self._scrolling = False
+        self._tick.stop()
+        self._pause_timer.stop()
+
+        self._text_w = QFontMetrics(self._font).horizontalAdvance(text)
+
+        if self._text_w > self.width():
+            self._pause_timer.start(self.PAUSE_MS)
+
+        self.update()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.setText(self._text)  # re-evaluate whether scrolling is needed
+
+    def _start_scroll(self):
+        self._pausing   = False
+        self._scrolling = True
+        self._tick.start()
+
+    def _step(self):
+        step          = self.SCROLL_PX_PER_S * (self._tick.interval() / 1000.0)
+        cycle         = self._text_w + self.GAP_PX
+        self._offset  = (self._offset + step) % cycle
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setFont(self._font)
+        p.setPen(self._color)
+        w  = self.width()
+        h  = self.height()
+        fm = QFontMetrics(self._font)
+        y  = fm.ascent() + 1
+        p.setClipRect(0, 0, w, h)
+        if not self._scrolling:
+            p.drawText(0, y, self._text)
+        else:
+            cycle = self._text_w + self.GAP_PX
+            x1    = -self._offset
+            p.drawText(int(x1),          y, self._text)
+            p.drawText(int(x1 + cycle),  y, self._text)
+        p.end()
 
 
 # ══════════════════════════════════════════════════════════
@@ -633,11 +747,23 @@ class MusicOverlay(QWidget):
         self.move(16, 16)
 
         self._build_ui()
-        self._refresh()
 
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._refresh)
-        self._timer.start(self.POLL_MS)
+        # Worker-based polling – API call runs in background thread,
+        # never blocks the UI thread (and thus never stutters the marquee).
+        self._worker = None
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(self._trigger_refresh)
+        self._poll_timer.start(self.POLL_MS)
+        self._trigger_refresh()  # immediate first fetch
+
+    def _trigger_refresh(self):
+        """Start a background worker to fetch Spotify state (if none is running)."""
+        if self._worker and self._worker.isRunning():
+            return  # previous request still in flight – skip this tick
+        self._worker = SpotifyWorker()
+        self._worker.result.connect(self._apply_track)
+        self._worker.error.connect(lambda e: print(f"[Worker] {e}"))
+        self._worker.start()
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
@@ -667,10 +793,13 @@ class MusicOverlay(QWidget):
         row1.addWidget(self.cover)
 
         info = QVBoxLayout(); info.setSpacing(3)
-        self.lbl_title  = QLabel("Loading…"); self.lbl_title.setObjectName("lblTitle")
-        self.lbl_artist = QLabel("");          self.lbl_artist.setObjectName("lblArtist")
-        # Ignored horizontal so text doesn't push the layout wider than the window
-        self.lbl_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+        font_title  = QFont("Segoe UI", 10, QFont.Weight.Bold)
+        font_artist = QFont("Segoe UI", 8)
+        self.lbl_title  = MarqueeLabel(font_title,  QColor("#FCFCFC"))
+        self.lbl_artist = MarqueeLabel(font_artist, QColor("#5D737E"))
+        self.lbl_title.setText("Loading…")
+
         info.addStretch(); info.addWidget(self.lbl_title)
         info.addWidget(self.lbl_artist); info.addStretch()
         row1.addLayout(info, 1)
@@ -735,14 +864,6 @@ class MusicOverlay(QWidget):
                 border-radius: 18px;
                 border: 1px solid rgba(93,115,126,0.22);
             }
-            QLabel#lblTitle {
-                color: #FCFCFC; font-size: 13px; font-weight: 700;
-                font-family: 'Segoe UI', sans-serif; letter-spacing: 0.1px;
-            }
-            QLabel#lblArtist {
-                color: #5D737E; font-size: 10px;
-                font-family: 'Segoe UI', sans-serif; letter-spacing: 0.4px;
-            }
             QWidget#sep { background: rgba(93,115,126,0.18); }
             QPushButton#btnGear {
                 color: rgba(93,115,126,0.4); font-size: 11px;
@@ -776,11 +897,12 @@ class MusicOverlay(QWidget):
 
     def _on_next(self):
         MusicAPI.next_track()
-        QTimer.singleShot(400, self._refresh)
+        # Short delay so Spotify has time to update before we poll again
+        QTimer.singleShot(400, self._trigger_refresh)
 
     def _on_prev(self):
         MusicAPI.previous_track()
-        QTimer.singleShot(400, self._refresh)
+        QTimer.singleShot(400, self._trigger_refresh)
 
     def _on_volume_change(self, value):
         MusicAPI.set_volume(value / 100.0)
@@ -788,20 +910,12 @@ class MusicOverlay(QWidget):
     def _open_settings(self):
         """Open the credential setup dialog."""
         self._setup = SetupDialog()
-        self._setup.done.connect(self._refresh)
+        self._setup.done.connect(self._trigger_refresh)
         self._setup.show()
 
-    def _refresh(self):
-        """Poll Spotify and update all UI elements."""
-        try:
-            track = MusicAPI.get_current_track()
-        except Exception as e:
-            print(f"[Overlay] refresh error: {e}")
-            return
-
-        title = track.get("title", "Unknown")
-        if len(title) > 24: title = title[:22] + "…"
-        self.lbl_title.setText(title)
+    def _apply_track(self, track: dict):
+        """Called on the UI thread when the background worker returns data."""
+        self.lbl_title.setText(track.get("title", "Unknown"))
         self.lbl_artist.setText(track.get("artist", ""))
 
         self._is_playing = track.get("is_playing", True)
