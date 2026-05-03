@@ -371,6 +371,62 @@ class MarqueeLabel(QWidget):
 
 
 # ══════════════════════════════════════════════════════════
+#  Collapse bar – separator line with a chevron in the centre
+# ══════════════════════════════════════════════════════════
+
+class CollapseBar(QWidget):
+    """
+    Horizontal rule with a small chevron in the middle.
+    Clicking anywhere on it emits `toggled`.
+    Arrow direction reflects collapsed state set via set_collapsed().
+    """
+    toggled = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._collapsed = False
+        self._hovered   = False
+        self.setFixedHeight(16)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_collapsed(self, state: bool):
+        self._collapsed = state
+        self.update()
+
+    def enterEvent(self, e): self._hovered = True;  self.update()
+    def leaveEvent(self, e): self._hovered = False; self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.toggled.emit()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h    = self.width(), self.height()
+        cy      = h // 2
+        gap     = 6
+        aw      = 20   # arrow zone width
+        line_c  = QColor(93, 115, 126, 45)
+        arrow_c = QColor("#5D737E") if self._hovered else QColor(93, 115, 126, 130)
+
+        p.setPen(QPen(line_c, 1))
+        p.drawLine(0,                      cy, w // 2 - aw // 2 - gap, cy)
+        p.drawLine(w // 2 + aw // 2 + gap, cy, w,                      cy)
+
+        p.setPen(QPen(arrow_c, 1.6, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        ax = w // 2
+        if self._collapsed:
+            pts = [QPointF(ax-5, cy-2.5), QPointF(ax, cy+2.5), QPointF(ax+5, cy-2.5)]
+        else:
+            pts = [QPointF(ax-5, cy+2.5), QPointF(ax, cy-2.5), QPointF(ax+5, cy+2.5)]
+        p.drawPolyline(QPolygonF(pts))
+        p.end()
+
+
+# ══════════════════════════════════════════════════════════
 #  Close button – painted X circle, reused in both windows
 # ══════════════════════════════════════════════════════════
 
@@ -805,11 +861,19 @@ class MusicOverlay(QWidget):
         row1.addLayout(info, 1)
         main.addLayout(row1)
 
-        # ── Separator ─────────────────────────────────────
-        sep = QWidget(); sep.setFixedHeight(1); sep.setObjectName("sep")
-        main.addWidget(sep)
+        # ── Collapse bar (separator + chevron) ────────────
+        self._collapsed = False
+        self.collapse_bar = CollapseBar()
+        self.collapse_bar.toggled.connect(self._toggle_collapse)
+        main.addWidget(self.collapse_bar)
 
-        # ── Playback controls ─────────────────────────────
+        # ── Collapsible bottom section ────────────────────
+        self._bottom = QWidget()
+        self._bottom.setObjectName("bottomSection")
+        bot = QVBoxLayout(self._bottom)
+        bot.setContentsMargins(0, 0, 0, 0)
+        bot.setSpacing(10)
+
         row2 = QHBoxLayout(); row2.setSpacing(0); row2.addStretch()
         self.btn_prev = PrevButton()
         self.btn_play = PlayPauseButton()
@@ -820,9 +884,8 @@ class MusicOverlay(QWidget):
         row2.addWidget(self.btn_prev); row2.addSpacing(8)
         row2.addWidget(self.btn_play); row2.addSpacing(8)
         row2.addWidget(self.btn_next); row2.addStretch()
-        main.addLayout(row2)
+        bot.addLayout(row2)
 
-        # ── Volume slider ─────────────────────────────────
         row3 = QHBoxLayout(); row3.setSpacing(8)
         self.slider_vol = QSlider(Qt.Orientation.Horizontal)
         self.slider_vol.setRange(0, 100); self.slider_vol.setValue(60)
@@ -830,23 +893,40 @@ class MusicOverlay(QWidget):
         self.slider_vol.valueChanged.connect(self._on_volume_change)
         row3.addWidget(VolumeIcon(15))
         row3.addWidget(self.slider_vol, 1)
-        main.addLayout(row3)
+        bot.addLayout(row3)
 
-        # ── Bottom row: settings gear only ───────────────
         self.btn_settings = QPushButton("⚙")
         self.btn_settings.setObjectName("btnGear")
         self.btn_settings.setFixedSize(18, 18)
         self.btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_settings.setFlat(True)
         self.btn_settings.clicked.connect(self._open_settings)
-
         gear_row = QHBoxLayout()
         gear_row.addWidget(self.btn_settings)
         gear_row.addStretch()
-        main.addLayout(gear_row)
+        bot.addLayout(gear_row)
+
+        main.addWidget(self._bottom)
 
         self._apply_ss()
+        # Let Qt compute the natural size first, then lock the width so
+        # collapse/expand only ever changes height – never width.
         self.adjustSize()
+        self._fixed_w = self.width()
+
+    def _toggle_collapse(self):
+        """Toggle the bottom controls section. Width is never touched."""
+        self._collapsed = not self._collapsed
+        self._bottom.setVisible(not self._collapsed)
+        self.collapse_bar.set_collapsed(self._collapsed)
+        # Use a single-shot timer so Qt finishes its layout pass before we
+        # read the new sizeHint – this avoids the Windows layered-window bug.
+        QTimer.singleShot(0, self._snap_height)
+
+    def _snap_height(self):
+        """Resize to the natural height while keeping the locked width."""
+        h = self.sizeHint().height()
+        self.setFixedSize(self._fixed_w, h)
 
     def resizeEvent(self, e):
         """Pin the X button to the inner top-right corner of the container."""
@@ -864,7 +944,6 @@ class MusicOverlay(QWidget):
                 border-radius: 18px;
                 border: 1px solid rgba(93,115,126,0.22);
             }
-            QWidget#sep { background: rgba(93,115,126,0.18); }
             QPushButton#btnGear {
                 color: rgba(93,115,126,0.4); font-size: 11px;
                 background: transparent; border: none;
