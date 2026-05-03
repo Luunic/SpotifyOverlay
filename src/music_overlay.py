@@ -390,8 +390,8 @@ class SetupDialog(QWidget):
         self.btn_close.clicked.connect(self.close)
 
         # Title row
-        h1  = QLabel("Spotify verbinden");  h1.setObjectName("h1")
-        sub = QLabel("Gib deine App-Credentials vom Spotify Developer Dashboard ein")
+        h1  = QLabel("Connect Spotify");  h1.setObjectName("h1")
+        sub = QLabel("Enter your app credentials from the Spotify Developer Dashboard")
         sub.setObjectName("sub"); sub.setWordWrap(True)
         lay.addWidget(h1); lay.addSpacing(4); lay.addWidget(sub); lay.addSpacing(16)
 
@@ -417,7 +417,7 @@ class SetupDialog(QWidget):
         hint.setObjectName("hint"); hint.setWordWrap(True)
         lay.addWidget(hint); lay.addSpacing(18)
 
-        self.btn_save = QPushButton("Verbinden & starten")
+        self.btn_save = QPushButton("Start connecting")
         self.btn_save.setObjectName("btnSave")
         self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_save.clicked.connect(self._on_save)
@@ -458,7 +458,7 @@ class SetupDialog(QWidget):
             self.done.emit()
             self.close()
         else:
-            self.btn_save.setText("Verbinden & starten")
+            self.btn_save.setText("Start connecting")
             self.btn_save.setEnabled(True)
             self.lbl_status.setText(
                 "Connection failed. Check your credentials and make sure\n"
