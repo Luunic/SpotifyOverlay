@@ -730,12 +730,12 @@ class VolumeIcon(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         s, cy = self._s, self._s // 2
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(C_DIM))
-        p.drawPolygon(QPolygonF([QPointF(1,cy-3), QPointF(5,cy-3), QPointF(8,cy-6),
-                                  QPointF(8,cy+6), QPointF(5,cy+3), QPointF(1,cy+3)]))
+        p.drawPolygon(QPolygonF([QPointF(1,cy-2), QPointF(5,cy-2), QPointF(8,cy-5),
+                                  QPointF(8,cy+7), QPointF(5,cy+4), QPointF(1,cy+4)]))
         p.setPen(QPen(C_DIM, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawArc(9, cy-3, 3, 6, -90*16, 180*16)
-        p.drawArc(10, cy-5, 5, 10, -90*16, 180*16)
+        p.drawArc(9, cy-2, 3, 6, -90*16, 180*16)
+        p.drawArc(10, cy-4, 5, 10, -90*16, 180*16)
         p.end()
 
 
@@ -961,8 +961,8 @@ class MusicOverlay(QWidget):
                 margin: -4px 0; border-radius: 5px;
             }
             QSlider#volSlider::handle:horizontal:hover {
-                background: #5D737E; width: 12px; height: 12px;
-                margin: -5px 0; border-radius: 6px;
+                background: #5D737E; width: 10px; height: 10px;
+                margin: -4px 0; border-radius: 5px;
             }
         """)
 
