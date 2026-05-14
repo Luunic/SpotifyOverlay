@@ -213,11 +213,13 @@ class MusicAPI:
             images    = (item.get("album") or {}).get("images") or []
             cover_url = images[-1].get("url") if images else None
             return {
-                "title":      title,
-                "artist":     artist,
-                "cover_url":  cover_url,
-                "volume":     (device.get("volume_percent") or 0) / 100.0,
-                "is_playing": pb.get("is_playing", False),
+                "title":       title,
+                "artist":      artist,
+                "cover_url":   cover_url,
+                "volume":      (device.get("volume_percent") or 0) / 100.0,
+                "is_playing":  pb.get("is_playing", False),
+                "progress_ms": pb.get("progress_ms") or 0,
+                "duration_ms": item.get("duration_ms") or 0,
             }
         except Exception as e:
             print(f"[Spotify] get_current_track: {e}")
@@ -247,6 +249,13 @@ class MusicAPI:
         if Sp is None: return
         try: Sp.previous_track()
         except Exception as e: print(f"[Spotify] previous_track: {e}")
+
+    @staticmethod
+    def seek_track(position_ms: int):
+        """Seek to a position in the current track (in milliseconds)."""
+        if Sp is None: return
+        try: Sp.seek_track(position_ms)
+        except Exception as e: print(f"[Spotify] seek_track: {e}")
 
     @staticmethod
     def set_volume(value: float):
@@ -367,6 +376,171 @@ class MarqueeLabel(QWidget):
             x1    = -self._offset
             p.drawText(int(x1),          y, self._text)
             p.drawText(int(x1 + cycle),  y, self._text)
+        p.end()
+
+
+# ══════════════════════════════════════════════════════════
+#  Progress bar – shows and controls song position
+# ══════════════════════════════════════════════════════════
+
+class ProgressBar(QWidget):
+    """
+    Clickable/draggable progress bar with timestamps.
+    Emits `seeked(int)` with the target position in ms when the user
+    clicks or releases a drag. A local timer advances the position
+    smoothly between API polls so the bar never looks frozen.
+    """
+    seeked = pyqtSignal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._progress_ms = 0
+        self._duration_ms = 0
+        self._dragging    = False
+        self._drag_ratio  = 0.0
+        self._locked      = False  # blocks incoming API updates while seeking
+        self._handle_hovered = False  # true only when mouse is directly over the handle
+
+        self.setFixedHeight(22)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)  # receive mouseMoveEvent without button held
+
+        # Local interpolation: advance progress by 1 s every second while playing
+        self._interp = QTimer(self)
+        self._interp.setInterval(1000)
+        self._interp.timeout.connect(self._tick)
+
+    # ── Public interface ───────────────────────────────────
+
+    def update_state(self, progress_ms: int, duration_ms: int, is_playing: bool):
+        """Called from _apply_track. Ignored while user is dragging/locked."""
+        if self._locked:
+            return
+        self._progress_ms = progress_ms
+        self._duration_ms = duration_ms
+        if is_playing:
+            self._interp.start()
+        else:
+            self._interp.stop()
+        self.update()
+
+    def unlock(self):
+        self._locked = False
+
+    # ── Internal ───────────────────────────────────────────
+
+    def _tick(self):
+        """Advance progress locally by 1 s to stay smooth between polls."""
+        if self._duration_ms > 0:
+            self._progress_ms = min(self._progress_ms + 1000, self._duration_ms)
+            self.update()
+
+    def _ratio_at(self, x: int) -> float:
+        track_x, track_w = self._track_rect()
+        return max(0.0, min(1.0, (x - track_x) / track_w))
+
+    def _track_rect(self):
+        """Returns (x_start, width) of the slider track area."""
+        return 0, self.width()
+
+    @staticmethod
+    def _fmt(ms: int) -> str:
+        s = ms // 1000
+        return f"{s // 60}:{s % 60:02d}"
+
+    # ── Mouse events ───────────────────────────────────────
+
+    def _handle_x(self) -> int:
+        """Returns the current x-centre of the handle in widget coordinates."""
+        ratio = self._drag_ratio if self._dragging else (
+            self._progress_ms / self._duration_ms if self._duration_ms else 0)
+        return int(ratio * self.width())
+
+    def leaveEvent(self, e):
+        if self._handle_hovered:
+            self._handle_hovered = False
+            self.update()
+
+    def mousePressEvent(self, e: QMouseEvent):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._dragging  = True
+            self._locked    = True
+            self._interp.stop()
+            self._drag_ratio = self._ratio_at(int(e.position().x()))
+            self.update()
+
+    def mouseMoveEvent(self, e: QMouseEvent):
+        if self._dragging:
+            self._drag_ratio = self._ratio_at(int(e.position().x()))
+            self.update()
+        else:
+            # Check if mouse is within hit-radius of the handle centre
+            HANDLE_R = 5
+            near = abs(int(e.position().x()) - self._handle_x()) <= HANDLE_R + 3
+            if near != self._handle_hovered:
+                self._handle_hovered = near
+                self.update()
+
+    def mouseReleaseEvent(self, e: QMouseEvent):
+        if self._dragging and e.button() == Qt.MouseButton.LeftButton:
+            self._dragging    = False
+            ratio             = self._ratio_at(int(e.position().x()))
+            target_ms         = int(ratio * self._duration_ms)
+            self._progress_ms = target_ms
+            self.seeked.emit(target_ms)
+            self._interp.start()
+            # Unlock after 2 s so any in-flight poll with old position is ignored
+            QTimer.singleShot(2000, self.unlock)
+            self.update()
+
+    # ── Paint ──────────────────────────────────────────────
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w  = self.width()
+        ts_h = 12   # timestamp row height
+        bar_y = ts_h + 4
+        bar_h = 3
+        handle_r = 5
+
+        # Timestamps
+        p.setFont(QFont("Segoe UI", 7))
+
+        if self._dragging:
+            cur_ms = int(self._drag_ratio * self._duration_ms)
+        else:
+            cur_ms = self._progress_ms
+
+        p.setPen(QColor("#5D737E"))
+        p.drawText(QRect(0, 0, w, ts_h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   self._fmt(cur_ms))
+        p.setPen(QColor(93, 115, 126, 128))
+        p.drawText(QRect(0, 0, w, ts_h),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                   self._fmt(self._duration_ms))
+
+        # Track groove
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor("#3F4045")))
+        p.drawRoundedRect(0, bar_y, w, bar_h, 2, 2)
+
+        # Filled portion
+        ratio = self._drag_ratio if self._dragging else (
+            cur_ms / self._duration_ms if self._duration_ms else 0)
+        fill_w = int(ratio * w)
+        if fill_w > 0:
+            p.setBrush(QBrush(QColor("#5D737E")))
+            p.drawRoundedRect(0, bar_y, fill_w, bar_h, 2, 2)
+
+        # Handle – white normally, steel blue when hovered directly over it (like volume slider)
+        handle_col = QColor("#5D737E") if self._handle_hovered else QColor("#FCFCFC")
+        hx = int(ratio * w)
+        p.setBrush(QBrush(handle_col))
+        p.drawEllipse(hx - handle_r, bar_y + bar_h // 2 - handle_r,
+                      handle_r * 2, handle_r * 2)
         p.end()
 
 
@@ -887,6 +1061,11 @@ class MusicOverlay(QWidget):
         row2.addWidget(self.btn_next); row2.addStretch()
         bot.addLayout(row2)
 
+        # Progress bar – sits between playback controls and volume slider
+        self.progress_bar = ProgressBar()
+        self.progress_bar.seeked.connect(self._on_seek)
+        bot.addWidget(self.progress_bar)
+
         row3 = QHBoxLayout(); row3.setSpacing(8)
         self.slider_vol = QSlider(Qt.Orientation.Horizontal)
         self.slider_vol.setRange(0, 100); self.slider_vol.setValue(60)
@@ -1003,6 +1182,10 @@ class MusicOverlay(QWidget):
         """Always send the new volume to Spotify – whether dragging or clicking."""
         MusicAPI.set_volume(value / 100.0)
 
+    def _on_seek(self, position_ms: int):
+        """Called when user releases the progress bar after dragging."""
+        MusicAPI.seek_track(position_ms)
+
     def _open_settings(self):
         """Open the credential setup dialog."""
         self._setup = SetupDialog()
@@ -1023,6 +1206,13 @@ class MusicOverlay(QWidget):
             self.slider_vol.blockSignals(True)
             self.slider_vol.setValue(int(track.get("volume", 0.5) * 100))
             self.slider_vol.blockSignals(False)
+
+        # Update progress bar (locked internally while user is seeking)
+        self.progress_bar.update_state(
+            track.get("progress_ms", 0),
+            track.get("duration_ms", 0),
+            track.get("is_playing", False),
+        )
 
         # Only re-download cover when the URL changes
         cover_url = track.get("cover_url")
