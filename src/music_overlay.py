@@ -792,6 +792,7 @@ class MusicOverlay(QWidget):
         self._is_playing = True
         self._opacity    = 0.93
         self._last_cover = None  # tracks last cover URL to avoid re-downloading
+        self._vol_locked = False  # True while user is dragging the volume slider
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -890,7 +891,10 @@ class MusicOverlay(QWidget):
         self.slider_vol = QSlider(Qt.Orientation.Horizontal)
         self.slider_vol.setRange(0, 100); self.slider_vol.setValue(60)
         self.slider_vol.setObjectName("volSlider")
+        self.slider_vol.setCursor(Qt.CursorShape.PointingHandCursor)
         self.slider_vol.valueChanged.connect(self._on_volume_change)
+        self.slider_vol.sliderPressed.connect(self._on_vol_pressed)
+        self.slider_vol.sliderReleased.connect(self._on_vol_released)
         row3.addWidget(VolumeIcon(15))
         row3.addWidget(self.slider_vol, 1)
         bot.addLayout(row3)
@@ -983,7 +987,20 @@ class MusicOverlay(QWidget):
         MusicAPI.previous_track()
         QTimer.singleShot(400, self._trigger_refresh)
 
+    def _on_vol_pressed(self):
+        """User started dragging – lock out API updates to the slider."""
+        self._vol_locked = True
+
+    def _on_vol_released(self):
+        """User released – unlock after a short delay so any in-flight poll
+        that still carries the old volume doesn't snap the slider back."""
+        QTimer.singleShot(2000, self._unlock_vol)
+
+    def _unlock_vol(self):
+        self._vol_locked = False
+
     def _on_volume_change(self, value):
+        """Always send the new volume to Spotify – whether dragging or clicking."""
         MusicAPI.set_volume(value / 100.0)
 
     def _open_settings(self):
@@ -1001,9 +1018,11 @@ class MusicOverlay(QWidget):
         self.btn_play.playing = self._is_playing
         self.btn_play.update()
 
-        self.slider_vol.blockSignals(True)
-        self.slider_vol.setValue(int(track.get("volume", 0.5) * 100))
-        self.slider_vol.blockSignals(False)
+        # Only sync slider from API when user is not touching it
+        if not self._vol_locked:
+            self.slider_vol.blockSignals(True)
+            self.slider_vol.setValue(int(track.get("volume", 0.5) * 100))
+            self.slider_vol.blockSignals(False)
 
         # Only re-download cover when the URL changes
         cover_url = track.get("cover_url")
